@@ -89,10 +89,14 @@ def remove_product(product_id, chat_id):
 
 
 def update_price(product_id, new_price, title, bajaj_available):
+    # bajaj_available can be None (unknown — Flipkart loads EMI via JS,
+    # not detectable via static scraping) — store as NULL, not int(None)
+    # which crashes.
+    stored_bajaj = None if bajaj_available is None else int(bajaj_available)
     with _get_conn() as conn:
         conn.execute(
             "UPDATE products SET last_price = ?, title = ?, bajaj_emi_available = ? WHERE id = ?",
-            (new_price, title, int(bajaj_available), product_id),
+            (new_price, title, stored_bajaj, product_id),
         )
         conn.commit()
 
