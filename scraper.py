@@ -33,29 +33,43 @@ from bs4 import BeautifulSoup
 # stripped-down/blocked page (no price data at all) when our headers
 # and cloudscraper's internal ones don't match exactly. Trust
 # cloudscraper's defaults alone.
-_session = cloudscraper.create_scraper(browser={"browser": "chrome", "platform": "windows", "mobile": False})
+def _new_session():
+    return cloudscraper.create_scraper(browser={"browser": "chrome", "platform": "windows", "mobile": False})
+
+
+_session = _new_session()
 
 
 class ScrapeError(Exception):
     pass
 
 
-def fetch_product(url: str) -> dict:
+def fetch_product(url: str, _retrying: bool = False) -> dict:
     """
     Returns {"title": str, "price": float, "bajaj_emi": bool}
     Raises ScrapeError if the page can't be parsed (blocked, layout
     changed, invalid URL, etc.)
+
+    403s from Flipkart are often transient (shared hosting IPs get
+    flagged inconsistently) — retries once with a fresh session before
+    giving up.
     """
+    global _session
     try:
         resp = _session.get(url, timeout=15, allow_redirects=True)
     except requests.RequestException as e:
         raise ScrapeError(f"Network error fetching page: {e}")
 
     if resp.status_code == 403:
+        if not _retrying:
+            _session = _new_session()  # fresh cookies/fingerprint, worth one retry
+            return fetch_product(url, _retrying=True)
         raise ScrapeError(
-            "Flipkart returned 403 (blocked this request). Retrying "
-            "automatically — if this persists every time, Flipkart may be "
-            "blocking your hosting IP entirely, which would need a proxy."
+            "Flipkart returned 403 (blocked this request) even after a "
+            "retry. This is usually transient on shared hosting IPs — "
+            "the next scheduled check will likely succeed. If it persists "
+            "for hours, Flipkart may be blocking Render's IP range "
+            "entirely, which would need a proxy service to fix."
         )
     if resp.status_code != 200:
         raise ScrapeError(f"Flipkart returned status {resp.status_code} (possibly blocked)")
