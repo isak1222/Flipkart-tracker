@@ -17,6 +17,7 @@ Env vars required (set these in Render's dashboard, never hardcode them):
 import os
 import logging
 import asyncio
+import html
 from telegram import Update
 from telegram.ext import (
     Application,
@@ -96,9 +97,10 @@ async def cmd_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.edit_text(
             f"Tracking added (id {product_id})\n"
             f"📦 {data['title']}\n"
-            f"💰 Current price: ₹{data['price']:,.0f}\n"
+            f"💵 <b>₹{data['price']:,.0f}</b>\n"
             f"🎯 Target: ₹{target_price:,.0f}\n"
-            f"🏦 Bajaj EMI: {emi_txt}"
+            f"🏦 Bajaj EMI: {emi_txt}",
+            parse_mode="HTML",
         )
     except ScrapeError as e:
         await msg.edit_text(
@@ -117,13 +119,13 @@ async def cmd_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     lines = []
     for p in products:
-        price = f"₹{p['last_price']:,.0f}" if p["last_price"] else "not yet fetched"
+        price = f"<b>₹{p['last_price']:,.0f}</b>" if p["last_price"] else "not yet fetched"
         emi = _bajaj_txt()
         lines.append(
             f"#{p['id']} — {p['title'] or p['url'][:40]}\n"
             f"   price: {price} | target: ₹{p['target_price']:,.0f} | Bajaj EMI: {emi}"
         )
-    await update.message.reply_text("\n\n".join(lines))
+    await update.message.reply_text("\n\n".join(lines), parse_mode="HTML")
 
 
 async def cmd_remove(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -152,11 +154,7 @@ async def cmd_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("No such product id.")
         return
     try:
-        data = fetch_product(product["url"])
-        await update.message.reply_text(
-            f"✅ Fetched OK\n{data['title']}\n₹{data['price']:,.0f}\n"
-            f"Bajaj EMI: {_bajaj_txt()}"
-        )
+        fetch_product(product["url"])  # quick validation before the real check
     except ScrapeError as e:
         await update.message.reply_text(f"❌ Fetch failed: {e}")
         return
@@ -205,16 +203,16 @@ async def _repeating_alarm(app: Application, product: dict):
             base_text = (
                 f"🔴🔴🔴 PRICE TARGET HIT — #{pid}\n"
                 f"{product['title']}\n"
-                f"₹{product['last_price']:,.0f} (target ₹{product['target_price']:,.0f})\n"
+                f"💵 <b>₹{product['last_price']:,.0f}</b> (target ₹{product['target_price']:,.0f})\n"
                 f"Reply /ack {pid} to stop these pings."
             )
             if escalated:
                 for _ in range(3):
-                    await app.bot.send_message(chat_id=chat_id, text="🚨 WAKE UP — " + base_text)
+                    await app.bot.send_message(chat_id=chat_id, text="🚨 WAKE UP — " + base_text, parse_mode="HTML")
                     await asyncio.sleep(2)
                 await asyncio.sleep(30)
             else:
-                await app.bot.send_message(chat_id=chat_id, text=base_text)
+                await app.bot.send_message(chat_id=chat_id, text=base_text, parse_mode="HTML")
                 await asyncio.sleep(ALARM_REPEAT_SECONDS)
             cycle += 1
     except asyncio.CancelledError:
@@ -230,22 +228,44 @@ async def _check_one(app: Application, product: dict, force_notify=False):
         return
 
     old_price = product["last_price"]
-    price_changed = old_price is not None and data["price"] != old_price
 
     storage.update_price(pid, data["price"], data["title"], data["bajaj_emi"])
 
-    if price_changed or force_notify:
-        direction = "⬇️" if (old_price and data["price"] < old_price) else "⬆️"
-        if old_price:
-            text = (
-                f"{direction} Price update — #{pid}\n"
-                f"{data['title']}\n"
-                f"₹{old_price:,.0f} → ₹{data['price']:,.0f}"
-            )
-        else:
-            text = f"💰 {data['title']}: ₹{data['price']:,.0f}"
-        text += f"\n🏦 Bajaj EMI: {_bajaj_txt()}"
-        await app.bot.send_message(chat_id=product["chat_id"], text=text)
+    title = html.escape(data["title"])
+    price_line = f"💵 <b>₹{data['price']:,.0f}</b>"
+
+    # Always notify — this is a heartbeat every check (default every 15
+    # min), not just on change. A price drop gets a special highlight
+    # since that's the one you actually care about acting on. Price is
+    # bolded on its own line so it's the first thing you see, not
+    # buried mid-sentence.
+    if old_price is None:
+        text = f"{title}\n{price_line}"
+    elif data["price"] < old_price:
+        drop = old_price - data["price"]
+        text = (
+            f"🟢⬇️ <b>PRICE DROPPED</b> — #{pid}\n"
+            f"{title}\n"
+            f"{price_line}\n"
+            f"was ₹{old_price:,.0f} (down ₹{drop:,.0f})"
+        )
+    elif data["price"] > old_price:
+        rise = data["price"] - old_price
+        text = (
+            f"🔺 Price update — #{pid}\n"
+            f"{title}\n"
+            f"{price_line}\n"
+            f"was ₹{old_price:,.0f} (up ₹{rise:,.0f})"
+        )
+    else:
+        text = (
+            f"➖ No change — #{pid}\n"
+            f"{title}\n"
+            f"{price_line}\n"
+            f"target ₹{product['target_price']:,.0f}"
+        )
+    text += f"\n🏦 Bajaj EMI: {_bajaj_txt()}"
+    await app.bot.send_message(chat_id=product["chat_id"], text=text, parse_mode="HTML")
 
     # Target price hit -> start/continue the repeating alarm
     if data["price"] <= product["target_price"]:
