@@ -18,6 +18,7 @@ if extraction starts failing.
 """
 
 import re
+import json
 import cloudscraper
 import requests
 from bs4 import BeautifulSoup
@@ -77,7 +78,7 @@ def fetch_product(url: str, _retrying: bool = False) -> dict:
     soup = BeautifulSoup(resp.text, "html.parser")
 
     title = _extract_title(soup)
-    price = _extract_price(soup, resp.text)
+    price = _extract_price(soup, resp.text, expected_title=title)
     bajaj_emi = _extract_bajaj_emi(soup, resp.text)
 
     if price is None:
@@ -100,16 +101,47 @@ def _extract_title(soup) -> str:
     return "Unknown product"
 
 
-def _extract_price(soup, raw_html) -> float | None:
-    # PRIMARY: Flipkart embeds structured JSON-LD product data with the
-    # real selling price at "offers":{"price":N,...} — confirmed via
-    # live inspection (2026-09-07) to be far more reliable than scanning
-    # for ₹ symbols, which picks up bank offers, EMI totals, protection
-    # plans, and similar/related product carousels that appear before
-    # the real price in the raw HTML.
-    match = re.search(r'"offers"\s*:\s*\{\s*"price"\s*:\s*([\d.]+)', raw_html)
-    if match:
-        return float(match.group(1))
+def _extract_price(soup, raw_html, expected_title: str = None) -> float | None:
+    # PRIMARY: Flipkart embeds structured JSON-LD product data. This is
+    # far more reliable than scanning for ₹ symbols (bank offers, EMI
+    # totals, protection plans, related-product carousels all appear as
+    # raw ₹ text before the real price). BUT the page can embed JSON-LD
+    # for MULTIPLE products (similar/related items use the same schema
+    # format) — confirmed via live testing (2026-09-07) that a blind
+    # whole-page regex grabs the wrong one. Parse each script block
+    # properly and match against the page's actual <title> to find the
+    # right entry.
+    blocks = re.findall(
+        r'<script[^>]*type=["\']application/ld\+json["\'][^>]*>(.*?)</script>',
+        raw_html, re.DOTALL
+    )
+    candidates = []
+    for block in blocks:
+        try:
+            data = json.loads(block)
+        except json.JSONDecodeError:
+            continue
+        items = data if isinstance(data, list) else [data]
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            offers = item.get("offers")
+            if isinstance(offers, dict) and "price" in offers:
+                try:
+                    price = float(offers["price"])
+                except (TypeError, ValueError):
+                    continue
+                candidates.append((item.get("name", ""), price))
+
+    if candidates:
+        if expected_title:
+            for name, price in candidates:
+                if name and (name in expected_title or expected_title in name):
+                    return price
+        # No title match (or none provided) — first candidate is the
+        # main product in every page tested so far (related items are
+        # appended after it in the script's list).
+        return candidates[0][1]
 
     # FALLBACK 1: common Flipkart price container classes (auto-generated,
     # changes often — may not match on a given page).
