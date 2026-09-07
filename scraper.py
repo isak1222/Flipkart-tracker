@@ -101,12 +101,23 @@ def _extract_title(soup) -> str:
 
 
 def _extract_price(soup, raw_html) -> float | None:
-    # Try common Flipkart price container classes first.
+    # PRIMARY: Flipkart embeds structured JSON-LD product data with the
+    # real selling price at "offers":{"price":N,...} — confirmed via
+    # live inspection (2026-09-07) to be far more reliable than scanning
+    # for ₹ symbols, which picks up bank offers, EMI totals, protection
+    # plans, and similar/related product carousels that appear before
+    # the real price in the raw HTML.
+    match = re.search(r'"offers"\s*:\s*\{\s*"price"\s*:\s*([\d.]+)', raw_html)
+    if match:
+        return float(match.group(1))
+
+    # FALLBACK 1: common Flipkart price container classes (auto-generated,
+    # changes often — may not match on a given page).
     price_tag = soup.find("div", class_=re.compile("Nx9bqj|_30jeq3"))
     if price_tag:
         return _parse_price_text(price_tag.get_text())
 
-    # Fallback: regex for ₹ followed by digits/commas anywhere in the page.
+    # FALLBACK 2 (least reliable): first ₹ amount anywhere on the page.
     match = re.search(r"₹\s?([\d,]+)", raw_html)
     if match:
         return _parse_price_text(match.group(0))
