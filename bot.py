@@ -293,9 +293,10 @@ async def _post_init(app: Application):
     # crashes with "There is no current event loop in thread 'MainThread'".
     scheduler = AsyncIOScheduler()
     scheduler.add_job(
-        lambda: asyncio.create_task(scheduled_check(app)),
+        scheduled_check,
         "interval",
         minutes=CHECK_INTERVAL_MINUTES,
+        args=[app],
     )
     scheduler.start()
     log.info("Scheduler started, checking every %s minutes", CHECK_INTERVAL_MINUTES)
